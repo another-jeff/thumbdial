@@ -20,6 +20,7 @@ Conventions for anyone (human or agent) making changes here. Design rationale li
 
 ```bash
 npm test                # pure logic — fast, no device needed
+npm run validate        # every domain tree against schema/node.schema.json
 npm run bundle-check    # bundles the whole graph (expo export --platform web)
 ```
 
@@ -51,6 +52,15 @@ modes*; see the pick-mode table in README.
 
 Also: `alignmentBaseline="central"` belongs on `<Text>` and **crashes Android on
 `<TextPath>`**. Don't move it.
+
+## The node contract has one source of truth
+
+`schema/node.schema.json` is it. Adding or changing a node field means editing the schema
+(with a `description` — it doubles as the spec), then `lib/validate.js` if the rule is
+cross-field or needs engine logic, then a bad fixture in `test/validate.test.mjs`, then
+README's node-shape block. `lib/validate.js` interprets a deliberately small JSON Schema
+subset; if you need a keyword it lacks, teach the interpreter — a guard test fails rather than
+letting the schema quietly stop being enforced.
 
 ## Docs are part of the change
 

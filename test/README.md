@@ -21,7 +21,8 @@ ESM already and Metro doesn't care.
 | `arrange.test.mjs` | ordinal expansion, **pick-mode declarations**, weights, arrangements, summary-wheel bucketing, group hoisting |
 | `sunburst.test.mjs` | layout structure, **proportional invariance**, hit-testing (rings, wedges, boundaries, shallow-leaf fallback) |
 | `selection.test.mjs` | coalescing picks into ranges, citation roles, reference grammars |
-| `domains.test.mjs` | the pack contract + a structural check of every shipped tree, and per-domain behavior |
+| `validate.test.mjs` | the schema + validator, mostly via **bad fixtures** — one per rule |
+| `domains.test.mjs` | the registry and per-domain behavior (the node contract is `validate`'s job) |
 | `helpers.mjs` | tree walking, float comparison, `assertPartitions` |
 
 Only pure logic is tested. `components/ThumbDial.js` (rendering, gesture, tween) has no
@@ -38,5 +39,11 @@ curved labels; see `doc/DESIGN.md` §5.
   without reading why it's there.
 - **`assertPartitions`** (in `helpers.mjs`) encodes the proportional-invariance invariant.
   Reach for it whenever you touch layout.
-- `domains.test.mjs`'s `validateTree` block is a hand-rolled stand-in for the **JSON Schema
-  + validator** we still want. When that lands, those assertions should become schema checks.
+- **A validator is only worth having if it fails**, so `validate.test.mjs` is mostly bad
+  fixtures: every rule in the schema and the semantic layer has a violating example, plus a
+  few "this is fine, don't cry wolf" cases. Add a rule ⇒ add a fixture that trips it.
+- One test guards against **silently under-validating**: if `schema/node.schema.json` grows a
+  keyword `lib/validate.js` can't enforce, `unsupportedKeywords` makes the suite fail until
+  the interpreter learns it. Don't route around that — teach the interpreter.
+- The node contract belongs to the schema. `domains.test.mjs` deliberately does **not**
+  re-check labels/types/fields by hand any more; it calls `validateDomain`.

@@ -23,7 +23,9 @@ Pure logic is split out and unit-tested so it's verifiable without a device:
 | `lib/sunburst.js` | proportional nested layout + hit-testing (radius = ring, angle = wedge) |
 | `lib/selection.js` | coalesce picked indices → ranges → a formatted reference string |
 | `components/ThumbDial.js` | rendering (`react-native-svg` + `d3-shape`), the PanResponder gesture, tween, controls |
+| `lib/validate.js` | enforces the node contract: a small JSON Schema interpreter + semantic rules |
 | `domains/*.js` | one file per list type: tree + citation grammar + copy (`bible`, `grocery`) |
+| `schema/node.schema.json` | the node contract, machine-readable and self-documenting |
 
 ### Engine vs. list type (the domain boundary)
 
@@ -178,6 +180,29 @@ Kept explicitly so we don't circle back.
   deferred basket mode a home (`pick: 'set'`) instead of requiring a second sniffer. The
   numeric fallback survives in *one* place only — the default formatter's role-finding, where
   it degrades a plain navigation path gracefully rather than switching a behavior on.
+
+- **`ajv` (or any schema library) for validation.** *Not chosen.* The obvious way to enforce
+  `schema/node.schema.json` is a real validator, and for a bigger project it would be the right
+  call. Here it would be the app's second-largest dependency and its only build-time one, to
+  check a contract with twelve fields, in a repo whose test layer deliberately has no
+  dependencies at all. `lib/validate.js` interprets the ~12 JSON Schema keywords our schema
+  actually uses instead. The risk of a hand-rolled interpreter is that it *silently* stops
+  enforcing things, so `unsupportedKeywords()` walks the schema for any keyword it can't handle
+  and a test fails if one appears — under-validating is louder than not validating. Revisit if
+  the schema ever needs conditionals, `patternProperties`, or cross-document `$ref`s.
+
+- **Validating structure and semantics in one place.** *Rejected.* First attempt put every rule
+  in the schema. But the rules that actually catch authoring mistakes aren't structural: "a
+  `pick: 'range'` node must have ordinal *leaves*" needs `childrenOf` (ordinals are generated,
+  not stored), "`short` must be shorter than `label`" is cross-field, "this arrangement's
+  `depth` reaches nothing" needs to walk the tree. Draft 2020-12 can express some of that
+  contortedly and none of it legibly. So the schema owns structure and `checkSemantics` owns
+  meaning — which also keeps the schema readable as the spec, which is half its value.
+
+- **Errors only, no warnings.** *Rejected.* A `short` longer than its `label`, or a branch with
+  `value: 0`, is almost certainly a mistake but runs fine. Failing the build on those would
+  make the validator something you route around; ignoring them makes it miss real slips. Two
+  tiers, and `valid` keys off errors alone.
 
 - **A `BibleDial` wrapper component.** *Not chosen (for now).* Splitting a generic
   `SunburstDial` from a thin domain wrapper is the strongest boundary, but it doubles the

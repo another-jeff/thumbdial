@@ -102,6 +102,41 @@ label shapes:
 pick nodes — touching a node's ordinal territory lands you on the node, since its ring is
 for selecting rather than navigating.
 
+### Validating your data
+
+[`schema/node.schema.json`](schema/node.schema.json) is the machine-readable version of the
+contract above (JSON Schema draft 2020-12, every field documented). Check a tree against it:
+
+```bash
+npm run validate            # every registered domain
+npm run validate bible      # one
+npm run validate -- --quiet # errors only
+```
+
+```
+✔ bible  531 nodes, no problems
+✖ broken  7 nodes, 2 errors
+  ✖ Root › Oops [$.children[2].verses]
+      unknown property "verses"
+  ✖ Root › 13 [$.children[1]]
+      pick: 'range' but child "1" is a branch — ordinals must be leaves
+```
+
+Or in code — [`lib/validate.js`](lib/validate.js), no dependencies:
+
+```js
+import { validateTree, validateDomain, formatReport } from './lib/validate';
+const { valid, errors, warnings } = validateTree(tree, schema);  // schema optional
+```
+
+It checks two layers. The **schema** covers structure: required fields, types, enums,
+`children` xor `ordinals`, and unknown properties (so `verses:` from the old spelling, or a
+`childern:` typo, is an error rather than silently ignored). **Semantic rules** cover what
+JSON Schema can't see — a `pick: 'range'` node must really have ordinal *leaves* to sweep, a
+`group` must group something, arrangement ids must be unique, an arrangement's `depth` must
+reach real nodes. Errors mean it will misbehave; warnings mean it'll run but you probably
+didn't mean it (a `short` longer than its `label`, a branch weighted to zero).
+
 ### Author-declared arrangements
 
 Beyond the automatic `Canonical` / `A–Z` / `By size`, a node can offer cross-level
@@ -133,8 +168,10 @@ node above it that is neither `group` nor an index.
 | `lib/arrange.js` | ordering, summary-wheel bucketing, weights, JIT ordinals, pick modes, group-hoisting |
 | `lib/sunburst.js` | proportional nested layout + hit-testing |
 | `lib/selection.js` | ranges, citation roles, reference formatting |
+| `lib/validate.js` | the node contract, enforced (schema interpreter + semantic rules) |
 | `components/ThumbDial.js` | rendering (`react-native-svg` + `d3-shape`), gesture, tween, controls |
 | `domains/*.js` | one file per list type: tree + grammar + copy |
+| `schema/node.schema.json` | the node contract, machine-readable |
 | `test/*.test.mjs` | pure-logic suite (`npm test`) — see [`test/README.md`](test/README.md) |
 
 Conventions for making changes — including source-control rules — are in
