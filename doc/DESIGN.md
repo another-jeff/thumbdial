@@ -19,30 +19,49 @@ Pure logic is split out and unit-tested so it's verifiable without a device:
 
 | File | Responsibility |
 |---|---|
-| `lib/arrange.js` | `children → [arrange] → [bucket] → items`; ordering, summary-wheel bucketing, weights, JIT verse expansion, group-hoisting |
+| `lib/arrange.js` | `children → [arrange] → [bucket] → items`; ordering, summary-wheel bucketing, weights, JIT ordinal expansion, pick modes, group-hoisting |
 | `lib/sunburst.js` | proportional nested layout + hit-testing (radius = ring, angle = wedge) |
 | `lib/selection.js` | coalesce picked indices → ranges → a formatted reference string |
 | `components/ThumbDial.js` | rendering (`react-native-svg` + `d3-shape`), the PanResponder gesture, tween, controls |
-| `data/samples.js` | `bible` + `grocery` demo trees |
+| `domains/*.js` | one file per list type: tree + citation grammar + copy (`bible`, `grocery`) |
+
+### Engine vs. list type (the domain boundary)
+
+The engine is **domain-agnostic**, and deliberately so — it speaks of *ordinal sets* and
+*pick modes*, never of chapters, verses, or groceries:
+
+- **`ordinals: N`** — N implicit leaves `"1".."N"`, expanded just-in-time. This is what
+  keeps a Bible tree at ~1,200 chapter nodes instead of ~31,000 verse nodes, and it's why
+  a domain can stay a plain JS module.
+- **`pick: 'range' | 'set' | false`** — what a node offers when focused, *declared by the
+  author*. `ordinals` implies `'range'`. Nothing is inferred from label shapes (see §3).
+- **A domain pack** is `{ id, title, tree, grammar?, copy?, hint?, formatSelection? }` —
+  one file, registered in `domains/index.js`. The pack shape is an **app** convention:
+  `App.js` spreads it onto explicit ThumbDial props, so the component never learns what a
+  domain is, and the engine has no import pointing at a dataset.
+- **Grammar, not vocabulary.** `{ joiner, between, dash }` drives both the tray string and
+  the hub's sweep preview from one source, so `13:1-3` punctuation lives with the Bible.
+  A domain whose reference isn't `"<title> <index><joiner><ranges>"` replaces the
+  formatter outright via `formatSelection`.
 
 ### The interaction model (where behaviors begin and end)
 
 The model was deliberately made *consistent* after an earlier version accreted mode
-seams. The rules now:
+seams. The rules now (stated in engine terms; the Bible reading is in parentheses):
 
-- **Navigation stops at chapters.** Verses are never a navigation target. Lifting
-  anywhere inside a chapter's verse territory (its wedge, or a verse/verse-bucket in
-  an outer ring) truncates to the chapter and lands there.
-- **`selecting` ⟺ you're on a chapter** — a node whose children are ordinal leaves,
-  and which is not a synthetic bucket. That is the *only* place verse-selection turns on.
-- **Selection is sticky.** It's `{chapter, context, verses}` tied to its chapter and is
+- **Navigation stops at pick nodes** (chapters). Ordinals (verses) are never a navigation
+  target. Lifting anywhere inside a pick node's ordinal territory (its wedge, or an
+  ordinal/bucket in an outer ring) truncates to the pick node and lands there.
+- **`selecting` ⟺ the focused node declares `pick: 'range'`** — and its children really are
+  leaves (a sanity guard, not an inference). That is the *only* place sweep-selection turns on.
+- **Selection is sticky.** It's `{node, context, picked}` tied to its pick node and is
   **not** cleared by navigation. Zooming out preserves the in-progress reference; only
-  **Use**, **Clear**, or starting a sweep on a *different* chapter resets it.
+  **Use**, **Clear**, or starting a sweep on a *different* pick node resets it.
 - **The reference is always visible** in the tray, derived from the sticky selection
   (if any) or the current path.
 - **The hub reads like a reference**: a stable title on top, the drilling target below
-  (`book` / `chapter` / `chapter:verse`). A tap on the hub zooms out — including from a
-  verse ring, since generated verse leaves have no wedge to lift on.
+  (`title` / `index` / `index:ordinal`). A tap on the hub zooms out — including from a
+  pick ring, since generated ordinals have no wedge to lift on.
 
 ### Design principle we hold firm
 
@@ -60,7 +79,8 @@ These are wanted or plausible; they were scoped out of a pass, not ruled out.
 - **Basket / cart multi-select (grocery behavior).** A cross-parent accumulator that
   survives navigation and collects unordered items (`Apples`, `Milk`, `Bread`) into a
   list, distinct from the ordinal *range* selection built for verses. Same `＋`/tray
-  surface, different coalescing (`set` vs `ordinal`). Designed, not built.
+  surface, different coalescing (`set` vs `ordinal`). Designed, not built — the slot for
+  it is `pick: 'set'`, already reserved in `pickModeOf`.
 - **Multiple pending references (a "reference basket").** Today, starting a sweep on a
   new chapter replaces the sticky selection. Holding several complete references
   (`Jer 5:1-3` **and** `Ps 23:1`) before committing is future work.
@@ -144,8 +164,25 @@ Kept explicitly so we don't circle back.
 
 - **"Last two context nodes = book + chapter" reference heuristic.** *Rejected.* It emitted
   nonsense like `Proph Jeremiah` at the book level. The formatter now walks the path
-  semantically (chapter = deepest numeric node; book = nearest non-numeric, non-`group`
-  node above it).
+  semantically — index = deepest node with a pick mode (numeric-label fallback), title =
+  nearest node above it that is neither an index nor a `group`.
+
+- **Inferring behavior from label shapes.** *Rejected — replaced by declarations.* The engine
+  used to decide *what a node is* by testing labels against `/^\d+$/`: `selecting` meant "all
+  children are numeric leaves," `atBook` meant "all children are numeric branches," and the
+  formatter's chapter/book roles came from the same regex. It read as elegant (zero
+  configuration!) but it made the Bible's conventions load-bearing in general code, and it was
+  a live bug: any dataset with numeric labels for something *else* — a quantity, a size, an
+  aisle or house number — would silently acquire a sweep-select verse ring and a `:`-joined
+  reference. Nodes now **declare** what they offer (`ordinals`, `pick`), which also gives the
+  deferred basket mode a home (`pick: 'set'`) instead of requiring a second sniffer. The
+  numeric fallback survives in *one* place only — the default formatter's role-finding, where
+  it degrades a plain navigation path gracefully rather than switching a behavior on.
+
+- **A `BibleDial` wrapper component.** *Not chosen (for now).* Splitting a generic
+  `SunburstDial` from a thin domain wrapper is the strongest boundary, but it doubles the
+  component surface to maintain for a single app. Domain packs get most of the isolation for
+  a fraction of the cost. Revisit if the engine is ever published separately.
 
 - **In-ring "A–Z" index item.** *Not chosen.* Surfacing arrangements as an extra slice in
   the wheel was offered; a **chip row** above the dial was chosen instead (doesn't spend a
@@ -163,14 +200,31 @@ Kept explicitly so we don't circle back.
 
 ---
 
-## 4. Known limitations / rough edges
+## 4. Fixed, worth remembering
+
+- **Runaway bucket recursion at small `maxSlices`.** *Fixed 2026-07-30, found by the new test
+  suite.* `makeBucket` re-buckets any bucket still holding more than `maxSlices` members, but
+  nothing guaranteed a split actually *shrank* its input: `pickNiceStep` could pick a ladder
+  step coarser than the whole range (150 items → one `1–150` bucket → re-bucket the same 150
+  → …), and `chunkBuckets` did the same whenever `maxSlices < 2`. It blew the stack rather
+  than hanging, so a dial configured with `maxSlices={4}` crashed on numeric data. Both split
+  functions now guarantee at least two buckets. The default `maxSlices` of 12 never reached
+  it, which is why it survived this long — the guarding test sweeps a matrix of sizes against
+  `maxSlices` 1–12.
+
+---
+
+## 5. Known limitations / rough edges
 
 - **Curved-label vertical position** may still carry a small bias on some renderers
   (see §2). The horizontal (angular) centering relies on `textAnchor="middle"` +
   `startOffset="50%"`.
 - **Very dense verse rings** (100+ verses) produce small targets; sweep + hub readout
   mitigate, block labels orient, but it's the standing hard case.
-- **Reference formatting** bakes in the "numeric level = chapter/verse" heuristic for its
-  default. Non-Bible shapes that use numbers differently should pass `formatSelection`.
+- **Reference formatting** assumes a `"<title> <index><joiner><ranges>"` citation shape.
+  A domain tunes its punctuation with `grammar`; anything structurally different (a
+  coordinate, a duration, a path) needs `formatSelection`. The old "numeric level =
+  chapter/verse" inference is gone from behavior and survives only as a fallback for
+  role-finding on plain navigation paths.
 - **Web/native parity** is validated by a headless `expo export --platform web` bundle;
   actual on-device rendering (curved text especially) still needs a human eye.
