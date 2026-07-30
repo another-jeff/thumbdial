@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/another-jeff/thumbdial/schema/node.schema.json",
+  "title": "ThumbDial node",
+  "description": "A node in a ThumbDial hierarchy. This file is the canonical, machine-readable statement of the node contract that README documents in prose. lib/validate.js interprets it (plus semantic rules JSON Schema cannot express) — see that file's header for the supported keyword subset.",
+  "$ref": "#/$defs/node",
+
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["label"],
+      "additionalProperties": false,
+      "not": {
+        "description": "A node expands EITHER by authored children or by an ordinal count, never both.",
+        "required": ["children", "ordinals"]
+      },
+      "properties": {
+        "label": {
+          "description": "What the wedge and hub call this node. Required on every node.",
+          "type": "string",
+          "minLength": 1
+        },
+        "short": {
+          "description": "Abbreviation used when the wedge is too small for `label` (e.g. 'Jn' for 'John'). Should not be longer than `label`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "detail": {
+          "description": "Secondary line shown in the hub while this node is hovered ('21 chapters').",
+          "type": "string"
+        },
+        "children": {
+          "description": "Authored children. Present and non-empty makes this a branch.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        },
+        "ordinals": {
+          "description": "N implicit leaves labelled \"1\"..\"N\", expanded just-in-time rather than stored. Implies pick: 'range'. Mutually exclusive with `children`.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "pick": {
+          "description": "What this node offers when focused. 'range' sweeps its ordinal children into ranges; 'set' is reserved for the deferred cross-parent basket mode; false opts out even when `ordinals` is present. Absent means navigate-only. NEVER inferred from label shapes.",
+          "anyOf": [{ "enum": ["range", "set"] }, { "const": false }]
+        },
+        "block": {
+          "description": "While picking, shade and label ordinals in blocks of this size (default 10).",
+          "type": "integer",
+          "minimum": 1
+        },
+        "value": {
+          "description": "Explicit weight, overriding the derived leaf count. Drives the wedge's angle.",
+          "type": "number",
+          "minimum": 0
+        },
+        "color": {
+          "description": "Slice colour override. Any CSS colour react-native-svg accepts.",
+          "type": "string",
+          "minLength": 1
+        },
+        "group": {
+          "description": "Marks an organizational layer the Flatten control can hoist away, promoting its children into its place. A group must have children, or Flatten would make it vanish.",
+          "type": "boolean"
+        },
+        "meta": {
+          "description": "Arbitrary author payload. Ignored by the engine and handed back with the node on select.",
+          "type": "object"
+        },
+        "arrangements": {
+          "description": "Author-declared orderings offered alongside the automatic Canonical / A–Z / By size.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/arrangement" }
+        }
+      }
+    },
+
+    "arrangement": {
+      "type": "object",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Stable identifier, unique among this node's arrangements.",
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "description": "Chip text.",
+          "type": "string",
+          "minLength": 1
+        },
+        "depth": {
+          "description": "How many levels below this node to gather (1 = direct children). Lets a node offer a cross-level index, e.g. every book two levels down.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "sort": {
+          "description": "'label' sorts alphabetically (numeric-aware), 'value-desc' by weight descending, 'none' keeps authored order.",
+          "enum": ["none", "label", "value-desc"]
+        },
+        "weighted": {
+          "description": "Whether this arrangement reports as proportional, which propagates weights into summary buckets.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
