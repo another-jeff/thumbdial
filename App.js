@@ -3,15 +3,17 @@ import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import ThumbDial from './components/ThumbDial';
-import { bible, grocery } from './data/samples';
+import { domains } from './domains';
 
-const DATASETS = { Bible: bible, Grocery: grocery };
 const HEADER_GAP = 32; // ~2em of breathing room below the safe-area inset
 
 function Demo() {
   const insets = useSafeAreaInsets();
-  const [which, setWhich] = useState('Bible');
+  const [which, setWhich] = useState(domains[0].id);
   const [result, setResult] = useState(null);
+  // A domain pack bundles the tree with its grammar and wording; the dial itself
+  // is domain-agnostic, so switching list types is switching one object.
+  const domain = domains.find((d) => d.id === which);
 
   const handleSelect = (leaf, ctx) => {
     // The "conclusion": for Bible this is like `John 1`; for Grocery, the item.
@@ -20,7 +22,7 @@ function Demo() {
   };
 
   const handleCommit = (payload) => {
-    // A compound verse reference, e.g. "1 Cor 13:1-3; 10-12; 18".
+    // A compound reference, e.g. "1 Cor 13:1-3; 10-12; 18".
     setResult({ tail: payload.formatted, path: `${payload.groups.length} range(s)` });
   };
 
@@ -29,24 +31,27 @@ function Demo() {
       <StatusBar style="light" />
 
       <View style={styles.switcher}>
-        {Object.keys(DATASETS).map((k) => (
+        {domains.map((d) => (
           <Pressable
-            key={k}
+            key={d.id}
             onPress={() => {
-              setWhich(k);
+              setWhich(d.id);
               setResult(null);
             }}
-            style={[styles.tab, which === k && styles.tabActive]}
+            style={[styles.tab, which === d.id && styles.tabActive]}
           >
-            <Text style={[styles.tabText, which === k && styles.tabTextActive]}>{k}</Text>
+            <Text style={[styles.tabText, which === d.id && styles.tabTextActive]}>{d.title}</Text>
           </Pressable>
         ))}
       </View>
 
-      {/* key forces a fresh dial (reset to root) when the dataset changes */}
+      {/* key forces a fresh dial (reset to root) when the domain changes */}
       <ThumbDial
         key={which}
-        data={DATASETS[which]}
+        data={domain.tree}
+        grammar={domain.grammar}
+        copy={domain.copy}
+        formatSelection={domain.formatSelection}
         onSelect={handleSelect}
         onCommitSelection={handleCommit}
       />
@@ -59,9 +64,7 @@ function Demo() {
             <Text style={styles.readoutPath}>{result.path}</Text>
           </>
         ) : (
-          <Text style={styles.readoutHint}>
-            Drag to read · lift to zoom/pick · tap hub to zoom out · on a chapter, ＋select then sweep verses
-          </Text>
+          <Text style={styles.readoutHint}>{domain.hint}</Text>
         )}
       </View>
     </View>

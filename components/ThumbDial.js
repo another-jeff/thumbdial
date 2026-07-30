@@ -2,13 +2,17 @@ import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { View, Text, Pressable, ScrollView, PanResponder, StyleSheet } from 'react-native';
 import Svg, { G, Path, Defs, Text as SvgText, TextPath } from 'react-native-svg';
 import { arc as d3arc } from 'd3-shape';
-import { availableArrangements, isBranch, childrenOf } from '../lib/arrange';
+import { availableArrangements, isBranch, childrenOf, pickModeOf } from '../lib/arrange';
 import { layout, hitTest, ringRadii } from '../lib/sunburst';
-import { coalesce, defaultFormatSelection } from '../lib/selection';
+import { coalesce, makeReferenceFormatter, DEFAULT_GRAMMAR } from '../lib/selection';
 
 /**
  * ThumbDial — a thumb-driven, zoomable nested sunburst for hierarchical data.
  * See lib/sunburst.js (layout) and lib/arrange.js (ordering/bucketing).
+ *
+ * Domain-agnostic: it knows about ordinal sets and pick modes, never about
+ * chapters or verses. A list type supplies its tree, grammar and copy — see
+ * domains/*.js.
  *
  * Gesture: drag to read a wedge out in the hub (radius = ring, angle = wedge);
  * lift to zoom a branch (fills the circle, animated) or pick a leaf. Tap the
@@ -17,11 +21,13 @@ import { coalesce, defaultFormatSelection } from '../lib/selection';
  * Labels curve along their arc and abbreviate to fit: full label → `short` →
  * single letter → nothing (the hub still names it).
  *
- * Node shape: { label, short?, detail?, children?, verses?, value?, color?, meta?, arrangements? }
- *   `verses: N` — a leaf-count that expands to verse leaves "1".."N" just in time.
+ * Node shape: { label, short?, detail?, children?, ordinals?, pick?, block?,
+ *               value?, color?, group?, meta?, arrangements? }
+ *   `ordinals: N` — N implicit leaves "1".."N", expanded just in time; implies
+ *   `pick: 'range'` (sweep them into ranges) unless `pick: false`.
  * Props: data, onSelect(leaf, ctx), onNavigate(node, ctx),
  *        onCommitSelection(payload), formatSelection(context, groups, labels),
- *        maxSlices=12, depth=2
+ *        grammar={joiner,between,dash}, copy, maxSlices=12, depth=2
  */
 const DEPTHS = [
   { id: 1, glyph: '◯' },
@@ -30,7 +36,12 @@ const DEPTHS = [
 ];
 const TAU = Math.PI * 2;
 const TWEEN_MS = 220;
-const VERSE_BLOCK = 10; // verses are labeled in blocks of this size when numerous
+const DEFAULT_BLOCK = 10; // ordinals are labeled/shaded in blocks of this size when numerous
+const DEFAULT_COPY = {
+  pickHint: 'Sweep to select a range',
+  navHint: 'Navigate to build a reference',
+  pickParentHint: 'pick one',
+};
 
 export default function ThumbDial({
   data,
@@ -38,6 +49,8 @@ export default function ThumbDial({
   onNavigate,
   onCommitSelection,
   formatSelection,
+  grammar,
+  copy,
   maxSlices = 12,
   depth = 2,
 }) {
@@ -47,40 +60,50 @@ export default function ThumbDial({
   const [hover, setHover] = useState(null);
   const [size, setSize] = useState(0);
   const [u, setU] = useState(1); // tween progress; 1 = settled
-  // Selection is sticky and tied to the chapter it was made on, so navigating
+  // Selection is sticky and tied to the node it was made on, so navigating
   // (esp. zooming out) never destroys the reference you're building.
-  const [sel, setSel] = useState(null); // { chapter, context, verses:Set } | null
+  const [sel, setSel] = useState(null); // { node, context, picked:Set } | null
   const [stroke, setStroke] = useState(null); // pending sweep { a, b, mode }
   const [collapseGroups, setCollapseGroups] = useState(false); // skip organizational layers
 
   const current = stack[stack.length - 1];
   const atRoot = stack.length === 1;
+  // `gram` (not `g` — the gesture handlers already use `g` for geometry).
+  const gram = useMemo(() => ({ ...DEFAULT_GRAMMAR, ...grammar }), [grammar]);
+  const words = useMemo(() => ({ ...DEFAULT_COPY, ...copy }), [copy]);
+  const fmt = useMemo(
+    () => formatSelection || makeReferenceFormatter(gram),
+    [formatSelection, gram]
+  );
 
   const arrangements = useMemo(() => availableArrangements(current), [current]);
   const activeId = arrangements.some((a) => a.id === arrangeId) ? arrangeId : 'canonical';
-  // You're on a chapter when its children are ordinal leaves (verses) — and it's
-  // not a synthetic bucket. That is the ONLY place verse-selection turns on.
+  // Range-selection turns on where the AUTHOR declared it (pickModeOf), never
+  // because some labels happened to look like numbers. The children guard is a
+  // sanity check, not an inference: you can't sweep branches.
   const selecting = useMemo(() => {
-    if (current.__bucket) return false;
+    if (pickModeOf(current) !== 'range') return false;
     const kids = childrenOf(current);
-    return kids.length > 0 && kids.every((c) => !isBranch(c) && /^\d+$/.test(String(c.label)));
+    return kids.length > 0 && !kids.some(isBranch);
   }, [current]);
+  const block = current.block || DEFAULT_BLOCK;
   // Are there organizational (grouping) layers here that could be collapsed?
   const hasGroups = useMemo(() => childrenOf(current).some((c) => c.group), [current]);
-  // At a "book": children are ordinal branches (chapters). Drives the hub readout.
-  const atBook = useMemo(() => {
+  // One level above the pick nodes (a book above its chapters) — drives the hub
+  // readout, which reads title-over-index there.
+  const atPickParent = useMemo(() => {
     if (selecting) return false;
     const kids = childrenOf(current);
-    return kids.length > 0 && kids.every((c) => isBranch(c) && /^\d+$/.test(String(c.label)));
+    return kids.length > 0 && kids.every((c) => pickModeOf(c) === 'range');
   }, [current, selecting]);
-  // The verses selected for the CURRENT chapter (sticky sel may belong elsewhere).
-  const activeVerses = sel && sel.chapter === current ? sel.verses : null;
-  const hasVerse = (i) => !!activeVerses && activeVerses.has(i);
+  // The picks for the CURRENT node (sticky sel may belong to another one).
+  const activePicks = sel && sel.node === current ? sel.picked : null;
+  const isPicked = (i) => !!activePicks && activePicks.has(i);
 
   const segments = useMemo(
     () =>
       selecting
-        ? layout(current, { arrangeId: 'canonical', maxDepth: 1, maxSlices: 1e9 }) // one unbucketed ring of verses
+        ? layout(current, { arrangeId: 'canonical', maxDepth: 1, maxSlices: 1e9 }) // one unbucketed ring of ordinals
         : layout(current, { arrangeId: activeId, maxDepth, maxSlices, collapseGroups }),
     [current, activeId, maxDepth, maxSlices, selecting, collapseGroups]
   );
@@ -94,8 +117,8 @@ export default function ThumbDial({
     setSel(null);
     setStroke(null);
   };
-  const versesLabelsFor = (chapter) =>
-    Array.from({ length: chapter?.verses || 0 }, (_, i) => String(i + 1));
+  const ordinalLabelsFor = (node) =>
+    node ? childrenOf(node).map((c) => String(c.label)) : [];
 
   // ---- tween --------------------------------------------------------------
   const transRef = useRef(null); // { dir:'in'|'out', sa0, sa1 }
@@ -225,9 +248,9 @@ export default function ThumbDial({
   const labels = useMemo(() => {
     if (u < 1) return [];
 
-    // Verse-selection ring: verses are ALWAYS individually selectable (never
-    // range-bucketed, so any range like 19-26 is reachable). Labels adapt — show
-    // each verse number when they fit, otherwise label in blocks (1–10, 11–20…)
+    // Range-selection ring: ordinals are ALWAYS individually selectable (never
+    // range-bucketed, so any span like 19-26 is reachable). Labels adapt — show
+    // each number when they fit, otherwise label in blocks (1–10, 11–20…)
     // purely for orientation.
     if (selecting) {
       const n = arcs.length;
@@ -252,9 +275,9 @@ export default function ThumbDial({
           .filter(Boolean);
       }
       const blocks = [];
-      for (let b = 0; b * VERSE_BLOCK < n; b++) {
-        const start = b * VERSE_BLOCK;
-        const end = Math.min(n, start + VERSE_BLOCK);
+      for (let b = 0; b * block < n; b++) {
+        const start = b * block;
+        const end = Math.min(n, start + block);
         const first = arcs[start];
         const last = arcs[end - 1];
         const text = end - 1 > start ? `${first.s.node.label}–${last.s.node.label}` : first.s.node.label;
@@ -284,7 +307,7 @@ export default function ThumbDial({
         };
       })
       .filter(Boolean);
-  }, [arcs, u, viewKey, t, selecting, innerR, outerR]);
+  }, [arcs, u, viewKey, t, selecting, innerR, outerR, block]);
 
   // ---- gesture ------------------------------------------------------------
   const geoRef = useRef({});
@@ -294,7 +317,7 @@ export default function ThumbDial({
   const strokeStartRef = useRef(null);
   const strokeModeRef = useRef('add');
   const strokeRef = useRef(null);
-  const sawVerseRef = useRef(false); // did this select-gesture ever touch a verse?
+  const sawPickRef = useRef(false); // did this select-gesture ever touch an ordinal?
 
   const polar = (e) => {
     const g = geoRef.current;
@@ -305,9 +328,9 @@ export default function ThumbDial({
     if (theta < 0) theta += TAU;
     return { r, theta, g };
   };
-  const verseAt = (r, theta, g) => {
-    if (r < g.innerR) return null;
-    const res = hitTest(r, theta, { innerR: g.innerR, ringThickness: g.t, maxDepth: 1, segments: g.segments });
+  const ordinalAt = (r, theta, geo) => {
+    if (r < geo.innerR) return null;
+    const res = hitTest(r, theta, { innerR: geo.innerR, ringThickness: geo.t, maxDepth: 1, segments: geo.segments });
     return res.segment ? res.segment.i : null;
   };
   const navTouch = (e) => {
@@ -333,18 +356,18 @@ export default function ThumbDial({
   const H = useRef({});
   H.current.grant = (e) => {
     if (selecting) {
-      sawVerseRef.current = false;
+      sawPickRef.current = false;
       const { r, theta, g } = polar(e);
-      const i = verseAt(r, theta, g);
+      const i = ordinalAt(r, theta, g);
       if (i == null) {
         strokeStartRef.current = null;
         strokeRef.current = null;
         setStroke(null);
         return;
       }
-      sawVerseRef.current = true;
+      sawPickRef.current = true;
       strokeStartRef.current = i;
-      strokeModeRef.current = hasVerse(i) ? 'remove' : 'add';
+      strokeModeRef.current = isPicked(i) ? 'remove' : 'add';
       const st = { a: i, b: i, mode: strokeModeRef.current };
       strokeRef.current = st;
       setStroke(st);
@@ -356,14 +379,14 @@ export default function ThumbDial({
   H.current.move = (e) => {
     if (selecting) {
       const { r, theta, g } = polar(e);
-      const i = verseAt(r, theta, g);
+      const i = ordinalAt(r, theta, g);
       if (i == null) return;
-      sawVerseRef.current = true;
+      sawPickRef.current = true;
       let s = strokeStartRef.current;
       if (s == null) {
         s = i;
         strokeStartRef.current = i;
-        strokeModeRef.current = hasVerse(i) ? 'remove' : 'add';
+        strokeModeRef.current = isPicked(i) ? 'remove' : 'add';
       }
       const st = { a: Math.min(s, i), b: Math.max(s, i), mode: strokeModeRef.current };
       strokeRef.current = st;
@@ -374,9 +397,9 @@ export default function ThumbDial({
   };
   H.current.release = (e) => {
     if (selecting) {
-      // A pure tap on the hub (no verse ever touched) zooms out — this is how
-      // you leave a verse ring, since generated verse leaves have no wedge to lift on.
-      if (!sawVerseRef.current) {
+      // A pure tap on the hub (no ordinal ever touched) zooms out — this is how
+      // you leave a pick ring, since generated ordinals have no wedge to lift on.
+      if (!sawPickRef.current) {
         strokeStartRef.current = null;
         strokeRef.current = null;
         setStroke(null);
@@ -385,10 +408,10 @@ export default function ThumbDial({
       }
       const st = strokeRef.current;
       if (st) {
-        const base = new Set(activeVerses || []);
+        const base = new Set(activePicks || []);
         for (let k = st.a; k <= st.b; k++) (st.mode === 'add' ? base.add(k) : base.delete(k));
         if (base.size === 0) setSel(null);
-        else setSel({ chapter: current, context: cleanPath(stack.slice(1)), verses: base });
+        else setSel({ node: current, context: cleanPath(stack.slice(1)), picked: base });
       }
       strokeStartRef.current = null;
       strokeRef.current = null;
@@ -402,12 +425,13 @@ export default function ThumbDial({
       else setHover(null);
       return;
     }
-    // Navigation stops at chapters: if the target lives inside a chapter's verse
-    // territory, land on the chapter (not the verse/bucket you happened to touch).
+    // Navigation stops at pick nodes: if the target lives inside a pick node's
+    // ordinal territory, land on the pick node (not the ordinal/bucket you
+    // happened to touch) — its ring is for selecting, not navigating.
     const chainSegs = h.chain;
-    const chapAt = chainSegs.findIndex((s) => s.node.verses > 0);
-    if (chapAt >= 0) {
-      const upto = chainSegs.slice(0, chapAt + 1);
+    const pickAt = chainSegs.findIndex((s) => pickModeOf(s.node));
+    if (pickAt >= 0) {
+      const upto = chainSegs.slice(0, pickAt + 1);
       zoom(upto.map((s) => s.node), upto[upto.length - 1]);
     } else if (isBranch(h.segment.node)) {
       zoom(chainSegs.map((s) => s.node), h.segment);
@@ -434,16 +458,16 @@ export default function ThumbDial({
   ).current;
 
   // ---- reference (sticky selection, else current nav path) ----------------
-  const verseLabels = useMemo(
+  const strokeLabels = useMemo(
     () => (selecting ? segments.map((s) => s.node.label) : []),
     [selecting, segments]
   );
   const currentContext = useMemo(() => cleanPath(stack.slice(1)), [stack]);
-  const hasSel = !!(sel && sel.verses.size);
+  const hasSel = !!(sel && sel.picked.size);
   const refContext = hasSel ? sel.context : currentContext;
-  const refGroups = hasSel ? coalesce([...sel.verses]) : [];
-  const refLabels = hasSel ? versesLabelsFor(sel.chapter) : [];
-  const formatted = (formatSelection || defaultFormatSelection)(refContext, refGroups, refLabels);
+  const refGroups = hasSel ? coalesce([...sel.picked]) : [];
+  const refLabels = hasSel ? ordinalLabelsFor(sel.node) : [];
+  const formatted = fmt(refContext, refGroups, refLabels);
   const commitSelection = () => {
     const payload = { context: refContext, groups: refGroups, labels: refLabels, formatted };
     if (onCommitSelection) onCommitSelection(payload);
@@ -457,29 +481,29 @@ export default function ThumbDial({
   const hoverChain =
     !selecting && hover?.chain ? hover.chain.map((sx) => segments.find((s) => s.sidx === sx)) : [];
   // The hub always reads like a reference: a stable title on top, the drilling
-  // target on the bottom. At a book → book / chapter; under a chapter →
-  // book / chapter:verse; elsewhere → generic hovered wedge + detail.
+  // target on the bottom. One level above the pick nodes → title / index; on a
+  // pick node → title / index:ordinal; elsewhere → hovered wedge + detail.
   let hubTop;
   let hubDetail;
   let chainAbove = '';
   if (selecting) {
-    const book = stack[stack.length - 2];
-    hubTop = book ? book.short || book.label : current.label;
-    const chap = current.label;
+    const parent = stack[stack.length - 2];
+    hubTop = parent ? parent.short || parent.label : current.label;
+    const idx = current.label;
     if (stroke) {
-      const a = verseLabels[stroke.a];
-      const b = verseLabels[stroke.b];
-      hubDetail = `${chap}:${a === b ? a : `${a}–${b}`}`;
+      const a = strokeLabels[stroke.a];
+      const b = strokeLabels[stroke.b];
+      hubDetail = `${idx}${gram.joiner}${a === b ? a : `${a}${gram.dash}${b}`}`;
     } else {
-      const n = activeVerses ? activeVerses.size : 0;
-      hubDetail = n ? `${chap} · ${n}✓` : chap;
+      const n = activePicks ? activePicks.size : 0;
+      hubDetail = n ? `${idx} · ${n}✓` : idx;
     }
-  } else if (atBook) {
+  } else if (atPickParent) {
     hubTop = current.short || current.label;
-    // Show the chapter whose territory you're over, never a verse bucket.
-    const chapSeg = hoverChain.find((s) => s?.node.verses > 0);
-    const chapNode = chapSeg?.node || hoveredSeg?.node;
-    hubDetail = chapNode ? chapNode.label : 'pick a chapter';
+    // Show the pick node whose territory you're over, never one of its buckets.
+    const pickSeg = hoverChain.find((s) => pickModeOf(s?.node));
+    const pickNode = pickSeg?.node || hoveredSeg?.node;
+    hubDetail = pickNode ? pickNode.label : words.pickParentHint;
   } else {
     hubTop = hoveredSeg ? hoveredSeg.node.label : current.label;
     hubDetail = hoveredSeg ? fmtDetail(hoveredSeg.node) : atRoot ? fmtDetail(current) : 'tap to zoom out';
@@ -593,10 +617,10 @@ export default function ThumbDial({
                   let strokeColor = 'transparent';
                   let strokeWidth = 0;
                   if (selecting) {
-                    const isSel = hasVerse(s.i);
+                    const isSel = isPicked(s.i);
                     const inStroke = stroke && s.i >= stroke.a && s.i <= stroke.b;
-                    // Alternate shading per block of 10 so verses read as large blocks.
-                    const band = Math.floor(s.i / VERSE_BLOCK) % 2 === 0;
+                    // Alternate shading per block so ordinals read as large blocks.
+                    const band = Math.floor(s.i / block) % 2 === 0;
                     fill = isSel ? '#6366f1' : band ? '#454562' : '#33333f';
                     opacity = 1;
                     if (inStroke) {
@@ -676,7 +700,7 @@ export default function ThumbDial({
       {/* Reference tray — you are always building toward a reference */}
       <View style={styles.tray}>
         <Text style={styles.trayText} numberOfLines={2}>
-          {formatted || (selecting ? 'Sweep across verses' : 'Navigate to build a reference')}
+          {formatted || (selecting ? words.pickHint : words.navHint)}
         </Text>
         <View style={styles.trayBtns}>
           {hasSel && (
