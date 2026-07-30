@@ -1,31 +1,27 @@
 /**
- * domains/* — the packs, plus a structural check of every tree they ship.
+ * domains/* — the packs and their per-domain behavior.
  *
- * The `validateTree` block is a stand-in for the JSON Schema + validator we still
- * want: it asserts the node contract README documents, over real data. When the
- * schema lands, these should become schema assertions rather than hand-rolled ones.
+ * The node contract itself is enforced by schema/node.schema.json via
+ * lib/validate.js; see test/validate.test.mjs. This file checks the registry
+ * and the behavior each domain is supposed to produce.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { domains, byId, bible, grocery } from '../domains/index.js';
-import { childrenOf, pickModeOf, isBranch, leafCount, buildDisplay } from '../lib/arrange.js';
+import { pickModeOf, isBranch, leafCount, buildDisplay } from '../lib/arrange.js';
 import { citationRoles, makeReferenceFormatter } from '../lib/selection.js';
 import { layout } from '../lib/sunburst.js';
+import { validateDomain, formatReport } from '../lib/validate.js';
 import { walk, find, pathTo, labelsOf } from './helpers.mjs';
 
-const KNOWN_FIELDS = new Set([
-  'label', 'short', 'detail', 'children', 'ordinals', 'pick', 'block',
-  'value', 'color', 'group', 'meta', 'arrangements',
-]);
+const schema = JSON.parse(readFileSync(new URL('../schema/node.schema.json', import.meta.url), 'utf8'));
 
 describe('the registry', () => {
-  test('every pack carries an id, a title and a tree', () => {
+  test('every pack validates against the schema and the pack contract', () => {
     for (const d of domains) {
-      assert.equal(typeof d.id, 'string', 'id');
-      assert.ok(d.id.length, `${d.id}: non-empty id`);
-      assert.equal(typeof d.title, 'string', `${d.id}: title`);
-      assert.ok(d.tree && typeof d.tree === 'object', `${d.id}: tree`);
-      assert.equal(typeof d.tree.label, 'string', `${d.id}: the root is a node`);
+      const result = validateDomain(d, schema);
+      assert.ok(result.valid, `${d.id} is invalid:\n${formatReport(result)}`);
     }
   });
 
@@ -39,120 +35,8 @@ describe('the registry', () => {
     assert.equal(byId.bible, bible);
   });
 
-  test('optional pack fields have the right shape when present', () => {
-    for (const d of domains) {
-      if (d.grammar !== undefined) {
-        assert.equal(typeof d.grammar, 'object', `${d.id}: grammar`);
-        for (const k of Object.keys(d.grammar)) {
-          assert.ok(['joiner', 'between', 'dash'].includes(k), `${d.id}: grammar.${k} is a real key`);
-          assert.equal(typeof d.grammar[k], 'string');
-        }
-      }
-      if (d.copy !== undefined) {
-        for (const k of Object.keys(d.copy)) {
-          assert.ok(
-            ['pickHint', 'navHint', 'pickParentHint'].includes(k),
-            `${d.id}: copy.${k} is a real key`
-          );
-          assert.equal(typeof d.copy[k], 'string');
-        }
-      }
-      if (d.hint !== undefined) assert.equal(typeof d.hint, 'string', `${d.id}: hint`);
-      if (d.formatSelection !== undefined) {
-        assert.equal(typeof d.formatSelection, 'function', `${d.id}: formatSelection`);
-      }
-    }
-  });
-});
-
-describe('validateTree — the node contract, over real data', () => {
   for (const d of domains) {
-    test(`${d.id}: every node has a non-empty label`, () => {
-      for (const n of walk(d.tree)) {
-        assert.equal(typeof n.label, 'string', `label on ${JSON.stringify(n).slice(0, 60)}`);
-        assert.ok(String(n.label).length > 0);
-      }
-    });
-
-    test(`${d.id}: no node declares both children and ordinals`, () => {
-      for (const n of walk(d.tree)) {
-        const both = n.ordinals > 0 && n.children && n.children.length > 0;
-        assert.ok(!both, `${n.label} must pick one expansion strategy`);
-      }
-    });
-
-    test(`${d.id}: ordinals is a positive integer where present`, () => {
-      for (const n of walk(d.tree)) {
-        if (n.ordinals === undefined) continue;
-        assert.ok(Number.isInteger(n.ordinals) && n.ordinals > 0, `${n.label}: ordinals`);
-      }
-    });
-
-    test(`${d.id}: pick is only a known mode`, () => {
-      for (const n of walk(d.tree)) {
-        if (n.pick === undefined) continue;
-        assert.ok([false, 'range', 'set'].includes(n.pick), `${n.label}: pick=${n.pick}`);
-      }
-    });
-
-    test(`${d.id}: a range pick has ordinal leaves to sweep`, () => {
-      for (const n of walk(d.tree)) {
-        if (pickModeOf(n) !== 'range') continue;
-        const kids = childrenOf(n);
-        assert.ok(kids.length > 0, `${n.label}: something to pick`);
-        assert.ok(!kids.some(isBranch), `${n.label}: ordinals must be leaves`);
-      }
-    });
-
-    test(`${d.id}: a group node actually groups something`, () => {
-      for (const n of walk(d.tree)) {
-        if (!n.group) continue;
-        assert.ok(childrenOf(n).length > 0, `${n.label}: an empty group would vanish on Flatten`);
-      }
-    });
-
-    test(`${d.id}: value and block are positive numbers where present`, () => {
-      for (const n of walk(d.tree)) {
-        if (n.value !== undefined) assert.ok(n.value >= 0, `${n.label}: value`);
-        if (n.block !== undefined) {
-          assert.ok(Number.isInteger(n.block) && n.block > 0, `${n.label}: block`);
-        }
-      }
-    });
-
-    test(`${d.id}: short is shorter than label (else it buys nothing)`, () => {
-      for (const n of walk(d.tree)) {
-        if (n.short === undefined) continue;
-        assert.ok(
-          String(n.short).length <= String(n.label).length,
-          `${n.label}: short "${n.short}" is not shorter`
-        );
-      }
-    });
-
-    test(`${d.id}: no unknown fields (typos in the contract)`, () => {
-      for (const n of walk(d.tree)) {
-        for (const k of Object.keys(n)) {
-          if (k.startsWith('__')) continue; // engine-internal markers
-          assert.ok(KNOWN_FIELDS.has(k), `${n.label}: unknown field "${k}"`);
-        }
-      }
-    });
-
-    test(`${d.id}: authored arrangements are well formed`, () => {
-      for (const n of walk(d.tree)) {
-        for (const a of n.arrangements || []) {
-          assert.equal(typeof a.id, 'string', `${n.label}: arrangement id`);
-          assert.equal(typeof a.label, 'string', `${n.label}: arrangement label`);
-          if (a.depth !== undefined) assert.ok(a.depth >= 1, `${n.label}: depth`);
-          if (a.sort !== undefined) {
-            assert.ok(['none', 'label', 'value-desc'].includes(a.sort), `${n.label}: sort=${a.sort}`);
-          }
-        }
-      }
-    });
-
-    test(`${d.id}: the root lays out and every ring fills the circle`, () => {
+    test(`${d.id}: the root lays out and ring 1 fills the circle`, () => {
       const segs = layout(d.tree, { maxDepth: 2, maxSlices: 12 });
       assert.ok(segs.length > 0);
       const ring1 = segs.filter((s) => s.depth === 1);
